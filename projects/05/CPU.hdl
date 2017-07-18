@@ -1,0 +1,261 @@
+// This file is part of www.nand2tetris.org
+// and the book "The Elements of Computing Systems"
+// by Nisan and Schocken, MIT Press.
+// File name: projects/05/CPU.hdl
+
+/**
+ * The Hack CPU (Central Processing unit), consisting of an ALU,
+ * two registers named A and D, and a program counter named PC.
+ * The CPU is designed to fetch and execute instructions written in 
+ * the Hack machine language. In particular, functions as follows:
+ * Executes the inputted instruction according to the Hack machine 
+ * language specification. The D and A in the language specification
+ * refer to CPU-resident registers, while M refers to the external
+ * memory location addressed by A, i.e. to Memory[A]. The inM input 
+ * holds the value of this location. If the current instruction needs 
+ * to write a value to M, the value is placed in outM, the address 
+ * of the target location is placed in the addressM output, and the 
+ * writeM control bit is asserted. (When writeM==0, any value may 
+ * appear in outM). The outM and writeM outputs are combinational: 
+ * they are affected instantaneously by the execution of the current 
+ * instruction. The addressM and pc outputs are clocked: although they 
+ * are affected by the execution of the current instruction, they commit 
+ * to their new values only in the next time step. If reset==1 then the 
+ * CPU jumps to address 0 (i.e. pc is set to 0 in next time step) rather 
+ * than to the address resulting from executing the current instruction. 
+ */
+
+CHIP CPU {
+
+    IN  inM[16],         // M value input  (M = contents of RAM[A])
+        instruction[16], // Instruction for execution
+        reset;           // Signals whether to re-start the current
+                         // program (reset==1) or continue executing
+                         // the current program (reset==0).
+
+    OUT outM[16],        // M value output
+        writeM,          // Write to M? 
+        addressM[15],    // Address in data memory (of M)
+        pc[15];          // address of next instruction
+
+    PARTS:
+    /*
+    C-Ins  A-Ins Store in A
+    i[15] !i[15] i[5]
+      |     |     | +----+
+      |     +-------| OR |
+      |     |     +-|    |----------+
+      |     |     | +----+          |
+      |     |     |                 |
+      |     | sel | +-----+         |
+      |     +-------| MUX |         |
+      |     |     | |     |----+    |
+      |     |     | +-----+    |    |
+      |     |     |  ^   ^     |    |
+      |     |     | ALU Instr  |    |
+      |     |     |          in|    |
+      |     |     | +----------V-+  |
+      |     |     | | A register |<-+ load
+      |     |     | +------------+
+    */
+    Not(in=instruction[15],out=ainst);
+    Or(a=ainst,b=instruction[5],out=wire1);
+    Mux16(a=cpuin,b=instruction,sel=ainst,out=aregin);
+    ARegister(in=aregin,
+              load=wire1,
+              out=areg,
+              out[0..14]=addressM,
+              out=pcload);
+
+    /*                       0 = A
+                             1 = M[A]
+                          +--I[12] (sel)
+                          |
+                    a  +--V--+
+        A regsiter --->| MUX |
+                    b  |     |--> ALU (Y)
+        InM memory --->|     |
+                       +-----+
+    */
+    Mux16(a=areg,b=inM,sel=instruction[12],out=yin);
+
+    /*
+      Store in D  +-----+
+        I[4]  --->| AND |
+      C-Instr.    |     |--+
+        I[15] --->|     |  |
+                  +-----+  |
+                       load|
+                  +--------V---+
+          ALU --->| D register |--> ALU (X)
+                  +------------+
+    */
+    And(a=instruction[4],b=instruction[15],out=dwrite);
+    DRegister(in=din,load=dwrite,out=xin);
+
+    /*
+      +--- !I[15] (A Instruction)
+      |
+      +---------------+
+      |               |
+      |            +--V--+
+      |  I[11] --->| MUX |
+      |    1   --->|     |--> ALU (ZX)
+      |            +-----+
+      +---------------+
+      |               |
+      |            +--V--+
+      |  I[10] --->| MUX |
+      |    0   --->|     |--> ALU (NX)
+      |            +-----+
+      +---------------+
+      |               |
+      |            +--V--+
+      |   I[9] --->| MUX |
+      |    0   --->|     |--> ALU (ZY)
+      |            +-----+
+      +---------------+
+      |               |
+      |            +--V--+
+      |   I[8] --->| MUX |
+      |    0   --->|     |--> ALU (NY)
+      |            +-----+
+      +---------------+
+      |               |
+      |            +--V--+
+      |   I[7] --->| MUX |
+      |    1   --->|     |--> ALU (Fn)
+      |            +-----+
+      +--------------+
+                     |
+                  +--V--+
+         I[6] --->| MUX |
+          0   --->|     |--> ALU (NO)
+                  +-----+
+    */
+    Mux(a=instruction[11],b=true,sel=ainst,out=zx);
+    Mux(a=instruction[10],b=false,sel=ainst,out=nx);
+    Mux(a=instruction[9],b=false,sel=ainst,out=zy);
+    Mux(a=instruction[8],b=false,sel=ainst,out=ny);
+    Mux(a=instruction[7],b=true,sel=ainst,out=fn);
+    Mux(a=instruction[6],b=false,sel=ainst,out=no);
+    ALU(x=xin,y=yin,
+        zx=zx,nx=nx,
+        zy=zy,ny=ny,
+        f=fn,no=no,
+        out=cpuin,
+        out=din,
+        out=outM,
+        zr=zero,
+        ng=neg);
+
+    /*
+     C-Ins Write-Mem
+     I[15]   I[3]
+       |      |     +-----+
+       |      +-----| AND |
+       +------------|     |
+       |      |     +-----+
+       |      |        |
+       |      | +------+
+       |      | |   +-----+
+       |      | +-->| AND |
+       +----------->|     |--> writeM (OUT)
+       |      |     +-----+
+    */
+    And(a=instruction[3],b=instruction[15],out=wwrite);
+    And(a=instruction[15],b=wwrite,out=writeM);
+
+    /*
+       IsZero IsNeg
+         |      |
+         +-------------------> == 0 (JEQ)
+         |      |
+         |      |   +-----+
+         +--------->| NOT |--> != 0 (JNE)
+         |      |   +-----+
+         |      |      |
+         |   +---------+
+         |   |  |
+         |   |  +------------> < 0 (JLT)
+         |   |  |
+         |   |  |   +-----+
+         |   |  +-->| NOT |--> >= 0 (JGE)
+         |   |  |   +-----+
+         |   |  |      |
+         |   |  | +----+
+         |   |  | |   +-----+
+         |   |  | +-->| AND |
+         |   +------->|     |--> > 0 (JGT)
+         |      |     +-----+
+         |      |
+         |      |   +----+
+         +--------->| OR |
+         |      +-->|    |--> <= 0 (JLE)
+         |      |   +----+
+    */
+    Not(in=zero,out=notzero);
+    Not(in=neg,out=pos);
+    And(a=notzero,b=pos,out=gt);
+    Or(a=zero,b=neg,out=le);
+
+    /*
+
+             +------+
+ (N JMP:0)-->|      |
+             |      |
+     (JGT)-->|      |
+             |      |
+     (JEQ)-->|      |
+             |      |   sel
+     (JGE)-->|  MUX |<--I[0]
+             |      |<--I[1]
+     (JLT)-->|      |<--I[2]
+             |      |
+     (JNE)-->|      |
+             |      |
+     (JLE)-->|      |
+             |      |
+   (JMP 1)-->|      |
+             +------+
+                |out
+                |   +-----+   +-- jmp
+                +-->| AND |   |
+            I(15)-->|     |---+
+          (C-Inst)  +-----+   |
+                           +--V--+
+                           | NOT |
+                           +-----+
+                              |
+                              +---not jmp
+    */
+    Mux8Way16(a[0]=false,
+              b[0]=gt,
+              c[0]=zero,
+              d[0]=pos,
+              e[0]=neg,
+              f[0]=notzero,
+              g[0]=le,
+              h[0]=true,
+              sel=instruction[0..2],
+              out[0]=tojmpa);
+    And(a=instruction[15],b=tojmpa,out=tojmp);
+    Not(in=tojmp,out=ntojmp);
+
+    /*
+          (in)   +-----+
+         A reg-->|     |
+          (load) |     |
+           jmp-->|     |
+          (inc)  | PC  |--> PC
+       not jmp-->|     |
+          (rst)  |     |
+         reset-->|     |
+                 +-----+
+    */
+    PC(in=pcload,
+       load=tojmp,
+       inc=ntojmp,
+       reset=reset,
+       out[0..14]=pc);
+}
